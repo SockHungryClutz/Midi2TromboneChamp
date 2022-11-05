@@ -1,3 +1,6 @@
+# DO NOT USE
+**This is an experimental branch meant to automate converting a lot of Rock Band tracks into Trombone Champ tracks. DO NOT USE THIS UNLESS YOU ABSOLUTELY KNOW WHAT YOU'RE DOING**
+
 # Midi2TromboneChamp
 Create charts for Trombone Champ from midis, to be used with [TrombLoader](https://github.com/NyxTheShield/TrombLoader)
 

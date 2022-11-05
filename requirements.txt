@@ -2,3 +2,5 @@
 easygui
 mido
 pyinstaller
+pydub
+pillow

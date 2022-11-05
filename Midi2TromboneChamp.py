@@ -3,10 +3,13 @@ from mido import MidiFile, MetaMessage, MidiTrack
 
 import sys
 import json
-from easygui import *
 import os
-import math
 import sys
+import configparser
+import math
+from RollingLogger import RollingLogger_Sync
+from pydub import AudioSegment
+from PIL import Image, ImageFilter
 
 def ticks2s(ticks, tempo, ticks_per_beat):
     """
@@ -35,70 +38,9 @@ def subLyrics(lyric):
     l = l.replace("`",'"')
     return l
 
-def history_file_path():
-    # https://stackoverflow.com/questions/7674790/bundling-data-files-with-pyinstaller-onefile
-    # pyinstaller secretly runs application from a temp directly and doesn't pass the original exe location through,
-    # so rather than creating a .json wherever the exe is, we have to dump it in appdata
-    directory = os.path.expandvars(r'%LOCALAPPDATA%\Midi2TromboneChamp')
-    if not os.path.exists(directory):
-        print(f"Creating directory to store config: {directory}")
-        os.mkdir(directory)
-    return os.path.join(directory, "history.json")
-
-# Load the field history
-dicc = dict()
-fileHistory = dict()
-history_file = history_file_path()
-loadSuccess = False
-if os.path.exists(history_file):
-    try:
-        with open(history_file, "r") as f:
-            fileHistory = json.load(f)
-        loadSuccess = True
-        dicc["name"]= fileHistory["name"]
-        dicc["shortName"]= fileHistory["shortName"]
-        dicc["trackRef"]= fileHistory["trackRef"]
-        dicc["year"] = fileHistory["year"]
-        dicc["author"] = fileHistory["author"]
-        dicc["genre"] = fileHistory["genre"]
-        dicc["description"] = fileHistory["description"]
-        dicc["difficulty"] = fileHistory["difficulty"]
-        dicc["savednotespacing"] = fileHistory["savednotespacing"]
-        dicc["timesig"] = fileHistory["timesig"]
-    except:
-        print("ERROR: Exception was raised when trying to load dialog history! " +
-              f"You may need to delete {history_file} to fix. Ignoring the history for now")
-if not loadSuccess:
-    # Default values for first time loading or if error occurred
-    dicc["name"]= ""
-    dicc["shortName"]= ""
-    dicc["trackRef"]= ""
-    dicc["year"] = 2022
-    dicc["author"] = ""
-    dicc["genre"] = ""
-    dicc["description"] = ""
-    dicc["difficulty"] = 5
-    dicc["savednotespacing"] = 120
-    dicc["timesig"] = 4
-    fileHistory["midfile"] = "*"
-    fileHistory["savefile"] = "song.tmb"
-
-path = fileopenbox(msg="Choose a MIDI file to convert.",
-                    default=fileHistory["midfile"],
-                    filetypes=[["\\*.mid", "\\*.midi"], "MIDI files"])
-fileHistory["midfile"] = path
-filename = os.path.basename(path)
-filename = os.path.splitext(filename)[0]
-songName = filename
-shortName = songName
-trackRef = songName.replace(" ","")
-defaultLength = 0.2
-bpm = float(enterbox("BPM of Midi", "Enter BPM", 120))
-DEFAULT_TEMPO = 60 / bpm
-
 # Compensation for the fact that TromboneChamp doesn't change tempo
 # These tempo values are in seconds per beat except bpm what and why
-def DynamicBeatToTromboneBeat(tempoEvents, midiBeat):
+def DynamicBeatToTromboneBeat(tempoEvents, midiBeat, bpm):
     baseTempo = 60 / bpm
     idx = 0
     if tempoEvents[0][1] == 0:
@@ -117,265 +59,294 @@ def DynamicBeatToTromboneBeat(tempoEvents, midiBeat):
     return round((time * bpm) / 60, 3)
 
 if __name__ == '__main__':
-    # Import the MIDI file...
-    mid = MidiFile(path, clip=True)
+    log = RollingLogger_Sync(level=4)
+    os.makedirs("./_output", exist_ok=True)
+    with open("./_output/songlist.csv",'w') as f:
+            f.write("Name,Artist,Genre,Difficulty")
+    for entry in os.scandir():
+        if not entry.is_dir(): continue
+        basepath = entry.path
+        path = os.path.join(basepath, "notes.mid")
+        dicc = dict()
+        filename = os.path.basename(path)
+        filename = os.path.splitext(filename)[0]
+        defaultLength = 0.2
+        bpm = 120
+        DEFAULT_TEMPO = 60 / bpm
 
-    print("TYPE: " + str(mid.type))
-    print("LENGTH: " + str(mid.length))
-    print("TICKS PER BEAT: " + str(mid.ticks_per_beat))
+        # Load configuration defaults
+        config = configparser.ConfigParser()
+        config.read(os.path.join(basepath, 'song.ini'))
 
-    if mid.type == 3:
-        print("Unsupported type.")
-        exit()
+        try:
+            foldername = config["song"]["name"].replace(' ','')
+            foldername = foldername.replace("'",'')
+            foldername = foldername.replace('"','')
+            dicc["name"]= config["song"]["name"]
+            dicc["shortName"]= config["song"]["name"][:16]
+            dicc["trackRef"]= foldername
+            dicc["year"] = int(config["song"]["year"])
+            dicc["author"] = config["song"]["artist"]
+            dicc["genre"] = config["song"]["genre"]
+            dicc["description"] = config["song"]["icon"]
+            dicc["difficulty"] = int(config["song"]["diff_vocals"]) + 3
+            dicc["savednotespacing"] = 120
+            dicc["timesig"] = 4
+        except:
+            log.info("No ini or missing section: " + str(basepath))
+            continue
 
-    """
-        First read all the notes in the MIDI file
-    """
-    tracksMerged = []
-    notes = {}
-    tick_duration = 60/(mid.ticks_per_beat*bpm)
+        if dicc["difficulty"] <= 2:
+            log.info("No vocal track indicated in ini: " + str(basepath))
+            continue
 
-    notes = []
-    print("Tick Duration:")
-    print(tick_duration)
+        # Import the MIDI file...
+        mid = MidiFile(path, clip=True)
 
-    print("Tempo:" + str(DEFAULT_TEMPO))
-        
-    final_bar = 0
+        log.info("DIR: " + str(basepath))
+        log.info("TYPE: " + str(mid.type))
+        log.info("LENGTH: " + str(mid.length))
+        log.info("TICKS PER BEAT: " + str(mid.ticks_per_beat))
 
-    allMidiEventsSorted = []
-    tempoEvents = []
-    lyricEvents = []
-    skipOtherTracks = False
+        if mid.type == 3:
+            log.error("Unsupported type.")
+            exit()
 
-    for i, track in enumerate(mid.tracks):
+        """
+            First read all the notes in the MIDI file
+        """
+        tick_duration = 60/(mid.ticks_per_beat*bpm)
+        notes = []
+        log.info("Tick Duration:")
+        log.info(str(tick_duration))
+
+        log.info("Tempo:" + str(DEFAULT_TEMPO))
+        final_bar = 0
+
+        allMidiEventsSorted = []
+        tempoEvents = []
+        lyricEvents = []
+        skipOtherTracks = False
+
+        for i, track in enumerate(mid.tracks):
+            tempo = DEFAULT_TEMPO
+            totaltime = 0
+            globalTime = 0
+            currentNote = []
+            glissyHints = dict()
+            globalBeatTime = 0
+            for message in track:
+                t = ticks2s(message.time, tempo, mid.ticks_per_beat)
+                tromboneBeat = message.time/mid.ticks_per_beat
+                totaltime += t
+                globalTime+= message.time
+                globalBeatTime+= tromboneBeat
+                currTime = globalTime*tick_duration*1000
+
+                if isinstance(message, MetaMessage):
+                    if message.type == "set_tempo":
+                        # Tempo change
+                        tempo = message.tempo / 10**6
+                        if globalBeatTime == 0:
+                            bpm = tempo
+                            notespacing = bpm
+                            while notespacing > 200:
+                                notespacing /= 2
+                            while notespacing < 100:
+                                notespacing *= 2
+                            dicc["savednotespacing"] = notespacing
+                        tempoEvents += [(tempo, globalBeatTime)]
+                        log.debug("Tempo Event: " + str(tempo) + " spb | " + str(globalBeatTime))
+                    elif message.type == "time_signature" and globalBeatTime == 0:
+                        dicc["timesig"] = message.numerator
+                    elif message.type == "track_name":
+                        if (message.name in ["PART VOCALS", "PART_VOCALS", "BAND VOCALS", "BAND_VOCALS"]):
+                            # Special track label for rockband/guitar hero tracks. All other events void.
+                            allMidiEventsSorted = []
+                            glissyHints = {}
+                            # Nothing important should be skipped, first track should be tempo and stuff
+                            skipOtherTracks = True
+                    elif message.type == "lyrics" or message.type == "text":
+                        if message.text[0] == "[":
+                            continue
+                        if message.text == "+":
+                            # Used in RB to hint that notes are slurred together
+                            glissyHints[globalBeatTime] = None
+                        else:
+                            lyricEvents += [(i, message.text, DynamicBeatToTromboneBeat(tempoEvents, globalBeatTime, bpm))]
+                    elif message.type == "end_of_track":
+                        pass
+                    else:
+                        log.warning("Unsupported metamessage: " + str(message))
+
+                else:
+                    allMidiEventsSorted += [(i, message, globalBeatTime)]
+            if skipOtherTracks:
+                break
+
+        allMidiEventsSorted = sorted(allMidiEventsSorted, key=lambda x: x[2] )
+
+        # Sort out lyric events
+        lyricsOut = []
+        for i, lyric, beat in lyricEvents:
+            l = subLyrics(lyric)
+            if l == "":
+                continue
+            lyricEvent = dict()
+            lyricEvent["text"] = l
+            lyricEvent["bar"] = round(beat, 3)
+            lyricsOut += [lyricEvent]
+
         tempo = DEFAULT_TEMPO
         totaltime = 0
         globalTime = 0
         currentNote = []
-        glissyHints = dict()
         globalBeatTime = 0
-        for message in track:
-            t = ticks2s(message.time, tempo, mid.ticks_per_beat)
-            tromboneBeat = message.time/mid.ticks_per_beat
-            totaltime += t
-            globalTime+= message.time
-            globalBeatTime+= tromboneBeat
-            currTime = globalTime*tick_duration*1000
+        noteToUse = 0
+        lastNote = -1000
+        defaultLength = 0.2
+        defaultSpacing = 0.2
+        noteTrimming = 0.0
+        currBeat = 0
+        noteHeld = False
+        lastNoteOffBeat = 0
+        heldNoteChannel = -1
 
+        for i, message, currBeat in allMidiEventsSorted:
+            currentBeat2 = DynamicBeatToTromboneBeat(tempoEvents, currBeat, bpm)
             if isinstance(message, MetaMessage):
-                if message.type == "set_tempo":
-                    # Tempo change
-                    tempo = message.tempo / 10**6
-                    tempoEvents += [(tempo, globalBeatTime)]
-                    print("Tempo Event: " + str(tempo) + " spb | " + str(globalBeatTime))
-                elif message.type == "track_name":
-                    if (message.name in ["PART VOCALS", "PART_VOCALS", "BAND VOCALS", "BAND_VOCALS"]):
-                        # Special track label for rockband/guitar hero tracks. All other events void.
-                        allMidiEventsSorted = []
-                        glissyHints = {}
-                        # Nothing important should be skipped, first track should be tempo and stuff
-                        skipOtherTracks = True
-                elif message.type == "lyrics" or message.type == "text":
-                    if message.text[0] == "[":
-                        continue
-                    if message.text == "+":
-                        # Used in RB to hint that notes are slurred together
-                        glissyHints[globalBeatTime] = None
+                if message.type == "end_of_track":
+                    pass
+                else:
+                    log.warning("Unsupported metamessage: " + str(message))
+            else:  # Note
+                if (message.type in ["note_on", "note_off"] and (message.note >= 96 or message.note < 16)):
+                    # ignore these special control signals for stuff like phrase start and end
+                    continue
+                if (message.type == "note_on" and message.velocity > 0):
+                    noteToUse = min(max(47, message.note),73)
+                    lastNote = noteToUse
+                    if (lastNoteOffBeat == currentBeat2): noteHeld = True
+                    try:
+                        glissyHints[currBeat]
+                        noteHeld = True
+                    except:
+                        pass
+                    # Truncate previous note if this next note is a little too close
+                    try:
+                        spacing = currentBeat2 - (notes[-1][1] + notes[-1][0])
+                        if (not noteHeld and spacing < defaultSpacing):
+                            notes[-1][1] = round(min(max(defaultLength, notes[-1][1] - (defaultSpacing - spacing)), notes[-1][1]), 3)
+                    except:
+                        pass
+                    if (not noteHeld):
+                        #No notes being held, so we set it up
+                        currentNote = SetupNote(currentBeat2, 0, noteToUse, noteToUse)
+                        heldNoteChannel = message.channel
                     else:
-                        lyricEvents += [(i, message.text, DynamicBeatToTromboneBeat(tempoEvents, globalBeatTime))]
-                elif message.type == "end_of_track":
-                    pass
-                else:
-                    print("Unsupported metamessage: " + str(message))
+                        #If we are holding one, we add the previous note we set up, and set up a new one
+                        log.debug("Cancelling Previous note! " + str(currentBeat2) + " old is " + str(currentNote[0]))
+                        # if currentNote has a length, that means that the previous note was already terminated
+                        # and this is a special condition to force a glissando
+                        if (currentNote[1] > defaultLength * 2):
+                            notes.pop()
+                            # it looks better if the slide starts in the middle of the previous note
+                            # but this isn't always best if the note is too short
+                            currentNote[1] = round(max(defaultLength,currentNote[1] / 2),3)
+                            notes += [currentNote]
+                            currentNote = [round(currentNote[0] + currentNote[1], 3),0,currentNote[2],0,0]
+                        elif (currentNote[1] > 0):
+                            # remove previous note, new note becomes a slide
+                            notes.pop()
+                        currentNote[1] = round(currentBeat2-currentNote[0],3)
+                        currentNote[4] = (noteToUse-60)*13.75
+                        currentNote[3] = currentNote[4]-currentNote[2]
 
-            else:
-                allMidiEventsSorted += [(i, message, globalBeatTime)]
-        if skipOtherTracks:
-            break
-
-    allMidiEventsSorted = sorted(allMidiEventsSorted, key=lambda x: x[2] )
-
-    # Sort out lyric events
-    lyricsOut = []
-    for i, lyric, beat in lyricEvents:
-        l = subLyrics(lyric)
-        if l == "":
-            continue
-        lyricEvent = dict()
-        lyricEvent["text"] = l
-        lyricEvent["bar"] = round(beat, 3)
-        lyricsOut += [lyricEvent]
-
-    tempo = DEFAULT_TEMPO
-    totaltime = 0
-    globalTime = 0
-    currentNote = []
-    globalBeatTime = 0
-    noteToUse = 0
-    lastNote = -1000
-    defaultLength = 0.2
-    defaultSpacing = 0.2
-    noteTrimming = 0.0
-    currBeat = 0
-    noteHeld = False
-    lastNoteOffBeat = 0
-    heldNoteChannel = -1
-
-    for i, message, currBeat in allMidiEventsSorted:
-        currentBeat2 = DynamicBeatToTromboneBeat(tempoEvents, currBeat)
-        if isinstance(message, MetaMessage):
-            if message.type == "end_of_track":
-                pass
-            else:
-                print("Unsupported metamessage: " + str(message))
-        else:  # Note
-            if (message.type in ["note_on", "note_off"] and (message.note >= 96 or message.note < 16)):
-                # ignore these special control signals for stuff like phrase start and end
-                continue
-            if (message.type == "note_on" and message.velocity > 0):
-                noteToUse = min(max(47, message.note),73)
-                lastNote = noteToUse
-                if (lastNoteOffBeat == currentBeat2): noteHeld = True
-                try:
-                    glissyHints[currBeat]
-                    noteHeld = True
-                except:
-                    pass
-                # Truncate previous note if this next note is a little too close
-                try:
-                    spacing = currentBeat2 - (notes[-1][1] + notes[-1][0])
-                    if (not noteHeld and spacing < defaultSpacing):
-                        notes[-1][1] = round(min(max(defaultLength, notes[-1][1] - (defaultSpacing - spacing)), notes[-1][1]), 3)
-                except:
-                    pass
-                if (not noteHeld):
-                    #No notes being held, so we set it up
-                    currentNote = SetupNote(currentBeat2, 0, noteToUse, noteToUse)
-                    heldNoteChannel = message.channel
-                else:
-                    #If we are holding one, we add the previous note we set up, and set up a new one
-                    print("Cancelling Previous note! " + str(currentBeat2) + " old is " + str(currentNote[0]))
-                    # if currentNote has a length, that means that the previous note was already terminated
-                    # and this is a special condition to force a glissando
-                    if (currentNote[1] > defaultLength * 2):
-                        notes.pop()
-                        # it looks better if the slide starts in the middle of the previous note
-                        # but this isn't always best if the note is too short
-                        currentNote[1] = round(max(defaultLength,currentNote[1] / 2),3)
+                        for noteParam in range(len(currentNote)):
+                                currentNote[noteParam] = round(currentNote[noteParam],3)
+                        if (currentNote[1] == 0):
+                                currentNote[1] = defaultLength
                         notes += [currentNote]
-                        currentNote = [round(currentNote[0] + currentNote[1], 3),0,currentNote[2],0,0]
-                    elif (currentNote[1] > 0):
-                        # remove previous note, new note becomes a slide
-                        notes.pop()
-                    currentNote[1] = round(currentBeat2-currentNote[0],3)
-                    currentNote[4] = (noteToUse-60)*13.75
-                    currentNote[3] = currentNote[4]-currentNote[2]
+                        currentNote = SetupNote(currentBeat2, 0, noteToUse, noteToUse)
+                    log.debug(str(currentNote))
+                    noteHeld = True
 
-                    for noteParam in range(len(currentNote)):
+                if (message.type == "note_off" or (message.type == "note_on" and message.velocity == 0)):
+                    noteToUse = min(max(47, message.note),73)
+                    lastNoteOffBeat = currentBeat2
+                    # The original intention was to terminate the held note when there was a noteoff event on channel 0
+                    # Other channels could be used for adding glissando. The issue is rock band charts frequently use
+                    # channel 3. As a compromise, note is terminated when a noteoff on the original channel is found.
+                    # This allows both to function as intended. And perhaps some people who accidentally use channel 1
+                    # will have a bit less of a headache
+                    if (message.channel == heldNoteChannel and noteToUse == lastNote and noteHeld):
+                        currentNote[1] = round(currentBeat2-currentNote[0] - noteTrimming,3)
+                        currentNote[4] = currentNote[4]
+                        currentNote[3] = 0
+                        for noteParam in range(len(currentNote)):
                             currentNote[noteParam] = round(currentNote[noteParam],3)
-                    if (currentNote[1] == 0):
+                        if (currentNote[1] <= 0):
                             currentNote[1] = defaultLength
-                    notes += [currentNote]
-                    currentNote = SetupNote(currentBeat2, 0, noteToUse, noteToUse)
-                print(currentNote)
-                noteHeld = True
+                        #log.info(currentNote)
+                        notes += [currentNote]
+                        noteHeld = False
 
-            if (message.type == "note_off" or (message.type == "note_on" and message.velocity == 0)):
-                noteToUse = min(max(47, message.note),73)
-                lastNoteOffBeat = currentBeat2
-                # The original intention was to terminate the held note when there was a noteoff event on channel 0
-                # Other channels could be used for adding glissando. The issue is rock band charts frequently use
-                # channel 3. As a compromise, note is terminated when a noteoff on the original channel is found.
-                # This allows both to function as intended. And perhaps some people who accidentally use channel 1
-                # will have a bit less of a headache
-                if (message.channel == heldNoteChannel and noteToUse == lastNote and noteHeld):
-                    currentNote[1] = round(currentBeat2-currentNote[0] - noteTrimming,3)
-                    currentNote[4] = currentNote[4]
-                    currentNote[3] = 0
-                    for noteParam in range(len(currentNote)):
-                        currentNote[noteParam] = round(currentNote[noteParam],3)
-                    if (currentNote[1] <= 0):
-                        currentNote[1] = defaultLength
-                    #print(currentNote)
-                    notes += [currentNote]
-                    noteHeld = False
+            final_bar = max(final_bar, currentBeat2)
+            #log.info("totaltime: " + str(totaltime)+"s")
 
+        notes = sorted(notes, key=lambda x: x[0] )
 
-        final_bar = max(final_bar, currentBeat2)
-        #print("totaltime: " + str(totaltime)+"s")
+        if len(notes) == 0 or len(lyricsOut) == 0:
+            log.warning("No notes or lyrics in current file, skipping")
+            continue
 
-    notes = sorted(notes, key=lambda x: x[0] )
+        dicc["notes"] = notes
+        dicc["endpoint"]= int(final_bar+4)
+        dicc["tempo"]= int(bpm)
+        dicc["lyrics"]= lyricsOut
+        dicc["UNK1"]= 0
 
-    msg = "Enter the Chart Info"
-    title = "Chart Info"
+        chartjson = json.dumps(dicc)
 
-    fieldNames =   ["Song Name",
-                    "Short Name",
-                    "Folder Name",
-                    "Year",
-                    "Author",
-                    "Genre",
-                    "Description",
-                    "Difficulty",
-                    "Note Spacing",
-                    "Song Endpoint (in beats)",
-                    "Beats per Bar"]
-    if dicc["name"].strip() != "":
-        songName = dicc["name"]
-        shortName = dicc["shortName"]
-        trackRef = dicc["trackRef"]
-    fieldValues =  [songName,
-                    shortName,
-                    trackRef,
-                    str(dicc["year"]),
+        csvdata = [dicc["name"].strip(','),
                     dicc["author"],
                     dicc["genre"],
-                    dicc["description"],
-                    str(dicc["difficulty"]),
-                    str(dicc["savednotespacing"]),
-                    int(final_bar+4),
-                    str(dicc["timesig"])]
-    fieldValues = multenterbox(msg,title, fieldNames, fieldValues)
+                    str(dicc["difficulty"])]
 
-    # make sure that none of the fields was left blank
-    while 1:
-        if fieldValues == None: break
-        errmsg = ""
-        for i in range(len(fieldNames)):
-          if fieldValues[i].strip() == "":
-            errmsg = errmsg + ('"%s" is a required field.\n\n' % fieldNames[i])
-        if errmsg == "": break # no problems found
-        fieldValues = multenterbox(errmsg, title, fieldNames, fieldValues)
-
-    dicc["name"]= fieldValues[0]
-    dicc["shortName"]= fieldValues[1]
-    dicc["trackRef"]= fieldValues[2]
-    dicc["year"]= int(fieldValues[3])
-    dicc["author"]= fieldValues[4]
-    dicc["genre"]= fieldValues[5]
-    dicc["description"]= fieldValues[6]
-    dicc["difficulty"]= int(fieldValues[7])
-    dicc["savednotespacing"]= int(fieldValues[8])
-    dicc["timesig"]= int(fieldValues[10])
-
-    settingjson = dicc.copy()
-    settingjson["midfile"] = fileHistory["midfile"]
-    settingjson["savefile"] = fileHistory["savefile"]
-
-    dicc["notes"] = notes
-    dicc["endpoint"]= int(fieldValues[9])
-    dicc["tempo"]= int(bpm)
-    dicc["lyrics"]= lyricsOut
-    dicc["UNK1"]= 0
-
-    chartjson = json.dumps(dicc)
-
-    settingjson["savefile"] = filesavebox(default=fileHistory["savefile"])
-    with open(settingjson["savefile"],"w") as file:
-        file.write(chartjson)
-
-    with open(history_file, "w") as settingFile:
-        json.dump(settingjson, settingFile)
+        outdir = os.path.join("./_output", dicc["trackRef"])
+        os.makedirs(outdir, exist_ok=True)
+        with open(os.path.join(outdir, "song.tmb"),"w") as file:
+            print("Writing chart for song " + dicc["trackRef"])
+            file.write(chartjson)
+        # Initializing shit at the scope I need it and setting it to NULL is a habit from C++
+        combinedAudio = None
+        tempAudio = None
+        for entry in os.scandir(basepath):
+            if entry.is_file() and entry.name[-4:].lower() == ".ogg":
+                log.info("Combining ogg file " + entry.name)
+                if combinedAudio == None:
+                    combinedAudio = AudioSegment.from_ogg(entry.path)
+                    combinedAudio = combinedAudio - 5
+                else:
+                    tempAudio = AudioSegment.from_ogg(entry.path)
+                    tempAudio = tempAudio - 5
+                    combinedAudio = combinedAudio.overlay(tempAudio)
+        print("Writing combined song.ogg")
+        combinedAudio.export(os.path.join(outdir,"song.ogg"), format="ogg")#, codec="libvorbis", bitrate="1441k")
+        # Make a cool BG that fills the 1920x1080 space smartly
+        print("Creating bg image")
+        bg = Image.new("RGBA", (1920, 1080))
+        with Image.open(os.path.join(basepath, "album.png")) as img1:
+            h = round((img1.size[1]/img1.size[0]) * 2100)
+            w = round((img1.size[0]/img1.size[1]) * 1080)
+            img2 = img1.resize((2100,h))
+            img2 = img2.filter(filter=ImageFilter.BoxBlur(radius=90))
+            h2 = math.floor((h - 1080) / 2)
+            bg.paste(img2.crop((90, h2, 1960, h - h2)))
+            img2 = img1.resize((w,1080))
+            bg.paste(img2, (math.floor((1920 - w)/2),0))
+        bg.save(os.path.join(outdir,"bg.png"), "PNG")
+        with open("./_output/songlist.csv",'a') as f:
+            f.write("\n" + ",".join(csvdata))
 
 sys.exit()

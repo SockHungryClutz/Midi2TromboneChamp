@@ -112,7 +112,7 @@ def DynamicBeatToTromboneBeat(tempoEvents, midiBeat, bpm):
     return round((time * bpm) / 60, 3)
 
 if __name__ == '__main__':
-    log = RollingLogger_Sync(level=5)
+    log = RollingLogger_Sync(level=4)
     os.makedirs("./_output", exist_ok=True)
     with open("./_output/songlist.csv",'w') as f:
             f.write("Name,Artist,Genre,Difficulty")
@@ -129,7 +129,7 @@ if __name__ == '__main__':
 
         # Load configuration defaults
         config = configparser.ConfigParser()
-        config.read(os.path.join(basepath, 'song.ini'))
+        config.read(os.path.join(basepath, 'song.ini'), encoding="utf-8")
 
         try:
             foldername = config["song"]["name"]
@@ -239,7 +239,7 @@ if __name__ == '__main__':
                             # Used in RB to hint that notes are slurred together
                             glissyHints[globalBeatTime] = None
                         else:
-                            lyricEvents += [(i, message.text, DynamicBeatToTromboneBeat(tempoEvents, globalBeatTime, bpm))]
+                            lyricEvents += [(i, message.text, DynamicBeatToTromboneBeat(tempoEvents, globalBeatTime, dicc["savednotespacing"]))]
                     elif message.type == "end_of_track":
                         pass
                     else:
@@ -279,7 +279,7 @@ if __name__ == '__main__':
         heldNoteChannel = -1
 
         for i, message, currBeat in allMidiEventsSorted:
-            currentBeat2 = DynamicBeatToTromboneBeat(tempoEvents, currBeat, bpm)
+            currentBeat2 = DynamicBeatToTromboneBeat(tempoEvents, currBeat, dicc["savednotespacing"])
             if isinstance(message, MetaMessage):
                 if message.type == "end_of_track":
                     pass
@@ -380,7 +380,7 @@ if __name__ == '__main__':
 
         outdir = os.path.join("./_output", dicc["trackRef"])
         os.makedirs(outdir, exist_ok=True)
-        with open(os.path.join(outdir, "song.tmb"),"w") as file:
+        with open(os.path.join(outdir, "song.tmb"),"w",encoding="utf-8") as file:
             print("Writing chart for song " + dicc["trackRef"])
             file.write(chartjson)
         # Initializing shit at the scope I need it and setting it to NULL is a habit from C++

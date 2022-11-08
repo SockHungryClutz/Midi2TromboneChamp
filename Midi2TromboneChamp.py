@@ -7,9 +7,56 @@ import os
 import sys
 import configparser
 import math
-from RollingLogger import RollingLogger_Sync
 from pydub import AudioSegment
 from PIL import Image, ImageFilter
+import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime
+import re
+
+class RollingLogger_Sync:
+    def __init__(self, name="logfile", fileSize=4194304, numFile=3, level=3):
+        if level == 0:
+            self.nologs = True
+        else:
+            self.logger = logging.getLogger(name)
+            if level == 1:
+                self.logger.setLevel(logging.CRITICAL)
+            elif level == 2:
+                self.logger.setLevel(logging.ERROR)
+            elif level == 3:
+                self.logger.setLevel(logging.WARNING)
+            elif level == 4:
+                self.logger.setLevel(logging.INFO)
+            else:
+                self.logger.setLevel(logging.DEBUG)
+            self.nologs = False
+            self.handler = RotatingFileHandler(name+".log", maxBytes=fileSize, backupCount=numFile)
+            self.logger.addHandler(self.handler)
+            self.logger.info(">Logger " + name + " initialized - " + str(datetime.now()) + "<")
+    
+    def debug(self, msg):
+        if not self.nologs:
+            self.logger.debug("[" + str(datetime.now()) + "] *   " +msg)
+    
+    def info(self, msg):
+        if not self.nologs:
+            self.logger.info("[" + str(datetime.now()) + "]     " +msg)
+    
+    def warning(self, msg):
+        if not self.nologs:
+            self.logger.warning("[" + str(datetime.now()) + "] !   " +msg)
+    
+    def error(self, msg):
+        if not self.nologs:
+            self.logger.error("[" + str(datetime.now()) + "] !!  " +msg)
+    
+    def critical(self, msg):
+        if not self.nologs:
+            self.logger.critical("[" + str(datetime.now()) + "] !!! " +msg)
+    
+    def closeLog(self):
+        pass
 
 def ticks2s(ticks, tempo, ticks_per_beat):
     """
@@ -38,6 +85,12 @@ def subLyrics(lyric):
     l = l.replace("`",'"')
     return l
 
+# Lotta stuff to remove
+def StripStr(str, chars):
+    for char in chars:
+        str = str.replace(char,'')
+    return str
+
 # Compensation for the fact that TromboneChamp doesn't change tempo
 # These tempo values are in seconds per beat except bpm what and why
 def DynamicBeatToTromboneBeat(tempoEvents, midiBeat, bpm):
@@ -59,7 +112,7 @@ def DynamicBeatToTromboneBeat(tempoEvents, midiBeat, bpm):
     return round((time * bpm) / 60, 3)
 
 if __name__ == '__main__':
-    log = RollingLogger_Sync(level=4)
+    log = RollingLogger_Sync(level=5)
     os.makedirs("./_output", exist_ok=True)
     with open("./_output/songlist.csv",'w') as f:
             f.write("Name,Artist,Genre,Difficulty")
@@ -79,25 +132,38 @@ if __name__ == '__main__':
         config.read(os.path.join(basepath, 'song.ini'))
 
         try:
-            foldername = config["song"]["name"].replace(' ','')
-            foldername = foldername.replace("'",'')
-            foldername = foldername.replace('"','')
+            foldername = config["song"]["name"]
+            foldername = StripStr(foldername, "'\"\\/?:><|*.")
+            namesplice = foldername.split()
+            shortname = ""
+            for word in namesplice:
+                if len(shortname) >= 20: break
+                if word.lower() in ["the","of","a","or"]: continue
+                if word.lower() == "and": shortname += " &"
+                if len(shortname) + len(word) > 20 and shortname != "": break
+                shortname += " " + word
+            foldername = config["song"]["artist"] + foldername
+            foldername = StripStr(foldername, "'\"\\/?:><|*. ")
+            foldername = foldername[:64]
             dicc["name"]= config["song"]["name"]
-            dicc["shortName"]= config["song"]["name"][:16]
+            dicc["shortName"]= shortname.strip()
             dicc["trackRef"]= foldername
-            dicc["year"] = int(config["song"]["year"])
+            dicc["year"] = int(re.findall(r'\d{4}',config["song"]["year"])[0]) # I hate Beatles Rock Band and its DLC
             dicc["author"] = config["song"]["artist"]
             dicc["genre"] = config["song"]["genre"]
             dicc["description"] = config["song"]["icon"]
             dicc["difficulty"] = int(config["song"]["diff_vocals"]) + 3
-            dicc["savednotespacing"] = 120
             dicc["timesig"] = 4
         except:
-            log.info("No ini or missing section: " + str(basepath))
+            log.warning("No ini or missing section: " + str(basepath))
             continue
+        try:
+            dicc["description"] = config["song"]["loading_phrase"]
+        except:
+            pass
 
         if dicc["difficulty"] <= 2:
-            log.info("No vocal track indicated in ini: " + str(basepath))
+            log.warning("No vocal track indicated in ini: " + str(basepath))
             continue
 
         # Import the MIDI file...
@@ -109,8 +175,8 @@ if __name__ == '__main__':
         log.info("TICKS PER BEAT: " + str(mid.ticks_per_beat))
 
         if mid.type == 3:
-            log.error("Unsupported type.")
-            exit()
+            log.warning("Unsupported midi type.")
+            continue
 
         """
             First read all the notes in the MIDI file
@@ -148,13 +214,13 @@ if __name__ == '__main__':
                         # Tempo change
                         tempo = message.tempo / 10**6
                         if globalBeatTime == 0:
-                            bpm = tempo
-                            notespacing = bpm
-                            while notespacing > 200:
-                                notespacing /= 2
-                            while notespacing < 100:
-                                notespacing *= 2
-                            dicc["savednotespacing"] = notespacing
+                            bpm = 60 / tempo
+                            tick_duration = 60/(mid.ticks_per_beat*bpm)
+                            dicc["tempo"]= round(60 / tempo)
+                            notespacing = 60 / tempo
+                            if notespacing < 50: notespacing += 100
+                            elif notespacing < 100: notespacing *= 2
+                            dicc["savednotespacing"] = round(notespacing)
                         tempoEvents += [(tempo, globalBeatTime)]
                         log.debug("Tempo Event: " + str(tempo) + " spb | " + str(globalBeatTime))
                     elif message.type == "time_signature" and globalBeatTime == 0:
@@ -167,7 +233,7 @@ if __name__ == '__main__':
                             # Nothing important should be skipped, first track should be tempo and stuff
                             skipOtherTracks = True
                     elif message.type == "lyrics" or message.type == "text":
-                        if message.text[0] == "[":
+                        if len(message.text) == 0 or message.text[0] == "[":
                             continue
                         if message.text == "+":
                             # Used in RB to hint that notes are slurred together
@@ -218,7 +284,7 @@ if __name__ == '__main__':
                 if message.type == "end_of_track":
                     pass
                 else:
-                    log.warning("Unsupported metamessage: " + str(message))
+                    log.info("Unsupported metamessage: " + str(message))
             else:  # Note
                 if (message.type in ["note_on", "note_off"] and (message.note >= 96 or message.note < 16)):
                     # ignore these special control signals for stuff like phrase start and end
@@ -302,7 +368,6 @@ if __name__ == '__main__':
 
         dicc["notes"] = notes
         dicc["endpoint"]= int(final_bar+4)
-        dicc["tempo"]= int(bpm)
         dicc["lyrics"]= lyricsOut
         dicc["UNK1"]= 0
 
@@ -321,8 +386,10 @@ if __name__ == '__main__':
         # Initializing shit at the scope I need it and setting it to NULL is a habit from C++
         combinedAudio = None
         tempAudio = None
+        print("Combining audio...")
         for entry in os.scandir(basepath):
             if entry.is_file() and entry.name[-4:].lower() == ".ogg":
+                if entry.name.lower() == "crowd.ogg": continue
                 log.info("Combining ogg file " + entry.name)
                 if combinedAudio == None:
                     combinedAudio = AudioSegment.from_ogg(entry.path)
@@ -340,10 +407,14 @@ if __name__ == '__main__':
             h = round((img1.size[1]/img1.size[0]) * 2100)
             w = round((img1.size[0]/img1.size[1]) * 1080)
             img2 = img1.resize((2100,h))
+            if img2.mode != "RGBA":
+                img2 = img2.convert("RGBA")
             img2 = img2.filter(filter=ImageFilter.BoxBlur(radius=90))
             h2 = math.floor((h - 1080) / 2)
             bg.paste(img2.crop((90, h2, 1960, h - h2)))
             img2 = img1.resize((w,1080))
+            if img2.mode not in ["RGB", "RGBA"]:
+                img2 = img2.convert("RGBA")
             bg.paste(img2, (math.floor((1920 - w)/2),0))
         bg.save(os.path.join(outdir,"bg.png"), "PNG")
         with open("./_output/songlist.csv",'a') as f:

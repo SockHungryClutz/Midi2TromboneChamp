@@ -64,13 +64,6 @@ def ticks2s(ticks, tempo, ticks_per_beat):
     """
     return ticks/ticks_per_beat * tempo
 
-def note2freq(x):
-    """
-        Convert a MIDI note into a frequency (given in Hz)
-    """
-    a = 440
-    return (a/32) * (2 ** ((x-9)/12))
-
 def SetupNote(beat, length, noteNumber, endNoteNumber):
     startPitch = (noteNumber-60)*13.75
     endPitch = (endNoteNumber-60)*13.75
@@ -144,7 +137,7 @@ if __name__ == '__main__':
                 shortname += " " + word
             foldername = config["song"]["artist"] + foldername
             foldername = StripStr(foldername, "'\"\\/?:><|*. ")
-            foldername = foldername[:64]
+            foldername = foldername[:48]
             dicc["name"]= config["song"]["name"]
             dicc["shortName"]= shortname.strip()
             dicc["trackRef"]= foldername
@@ -160,6 +153,7 @@ if __name__ == '__main__':
         try:
             dicc["description"] = config["song"]["loading_phrase"]
         except:
+            dicc["description"] = config["song"]["icon"]
             pass
 
         if dicc["difficulty"] <= 2:
@@ -198,7 +192,6 @@ if __name__ == '__main__':
             tempo = DEFAULT_TEMPO
             totaltime = 0
             globalTime = 0
-            currentNote = []
             glissyHints = dict()
             globalBeatTime = 0
             for message in track:
@@ -229,17 +222,18 @@ if __name__ == '__main__':
                         if (message.name in ["PART VOCALS", "PART_VOCALS", "BAND VOCALS", "BAND_VOCALS"]):
                             # Special track label for rockband/guitar hero tracks. All other events void.
                             allMidiEventsSorted = []
+                            lyricEvents = []
                             glissyHints = {}
                             # Nothing important should be skipped, first track should be tempo and stuff
                             skipOtherTracks = True
                     elif message.type == "lyrics" or message.type == "text":
-                        if len(message.text) == 0 or message.text[0] == "[":
+                        if len(message.text) == 0 or message.text[0] in ["["," "]:
                             continue
                         if message.text == "+":
                             # Used in RB to hint that notes are slurred together
                             glissyHints[globalBeatTime] = None
                         else:
-                            lyricEvents += [(i, message.text, DynamicBeatToTromboneBeat(tempoEvents, globalBeatTime, dicc["savednotespacing"]))]
+                            lyricEvents += [(i, message.text, DynamicBeatToTromboneBeat(tempoEvents, globalBeatTime, dicc["tempo"]))]
                     elif message.type == "end_of_track":
                         pass
                     else:
@@ -267,6 +261,16 @@ if __name__ == '__main__':
         totaltime = 0
         globalTime = 0
         currentNote = []
+        currentPhrase = []
+        # oh boy, how do I explain this?
+        # TC has a pretty limited range
+        # If a bunch of notes are outside the range, the notes need to be shifted
+        # Shifting just one note sounds weird, but vocals in rockband mark phrases
+        # If more notes are currently out of range than would be if the range was shifted, then its ok to shift
+        # Acts sort of like voting with which direction to shift (if at all)
+        # 4 sections for votes for moving up/against and votes for moving down vs against
+        shiftVotes = [0,0,0,0]
+        phraseOpen = False
         globalBeatTime = 0
         noteToUse = 0
         lastNote = -1000
@@ -279,7 +283,7 @@ if __name__ == '__main__':
         heldNoteChannel = -1
 
         for i, message, currBeat in allMidiEventsSorted:
-            currentBeat2 = DynamicBeatToTromboneBeat(tempoEvents, currBeat, dicc["savednotespacing"])
+            currentBeat2 = DynamicBeatToTromboneBeat(tempoEvents, currBeat, dicc["tempo"])
             if isinstance(message, MetaMessage):
                 if message.type == "end_of_track":
                     pass
@@ -287,9 +291,30 @@ if __name__ == '__main__':
                     log.info("Unsupported metamessage: " + str(message))
             else:  # Note
                 if (message.type in ["note_on", "note_off"] and (message.note >= 96 or message.note < 16)):
-                    # ignore these special control signals for stuff like phrase start and end
+                    if (message.type == "note_on" and message.velocity > 0) and (message.note == 105 or message.note == 106):
+                        if shiftVotes[2] > shiftVotes[3]:
+                            for note in currentPhrase:
+                                note[2] = round(((note[2]/13.75)-12)*13.75,3)
+                                note[4] = round(((note[4]/13.75)-12)*13.75,3)
+                                note[3] = round(note[4]-note[2],3)
+                        elif shiftVotes[0] > shiftVotes[1]:
+                            for note in currentPhrase:
+                                note[2] = round(((note[2]/13.75)+12)*13.75,3)
+                                note[4] = round(((note[4]/13.75)+12)*13.75,3)
+                                note[3] = round(note[4]-note[2],3)
+                        notes += currentPhrase
+                        currentPhrase = []
+                        shiftVotes = [0,0,0,0]
                     continue
                 if (message.type == "note_on" and message.velocity > 0):
+                    if message.note < 47:
+                        shiftVotes[0] += 1
+                    elif message.note > 73:
+                        shiftVotes[2] += 1
+                    elif message.note < 59:
+                        shiftVotes[3] += 1
+                    elif message.note > 61:
+                        shiftVotes[1] += 1
                     noteToUse = min(max(47, message.note),73)
                     lastNote = noteToUse
                     if (lastNoteOffBeat == currentBeat2): noteHeld = True
@@ -300,9 +325,9 @@ if __name__ == '__main__':
                         pass
                     # Truncate previous note if this next note is a little too close
                     try:
-                        spacing = currentBeat2 - (notes[-1][1] + notes[-1][0])
+                        spacing = currentBeat2 - (currentPhrase[-1][1] + currentPhrase[-1][0])
                         if (not noteHeld and spacing < defaultSpacing):
-                            notes[-1][1] = round(min(max(defaultLength, notes[-1][1] - (defaultSpacing - spacing)), notes[-1][1]), 3)
+                            currentPhrase[-1][1] = round(min(max(defaultLength, currentPhrase[-1][1] - (defaultSpacing - spacing)), currentPhrase[-1][1]), 3)
                     except:
                         pass
                     if (not noteHeld):
@@ -315,15 +340,15 @@ if __name__ == '__main__':
                         # if currentNote has a length, that means that the previous note was already terminated
                         # and this is a special condition to force a glissando
                         if (currentNote[1] > defaultLength * 2):
-                            notes.pop()
+                            currentPhrase.pop()
                             # it looks better if the slide starts in the middle of the previous note
                             # but this isn't always best if the note is too short
                             currentNote[1] = round(max(defaultLength,currentNote[1] / 2),3)
-                            notes += [currentNote]
+                            currentPhrase += [currentNote]
                             currentNote = [round(currentNote[0] + currentNote[1], 3),0,currentNote[2],0,0]
                         elif (currentNote[1] > 0):
                             # remove previous note, new note becomes a slide
-                            notes.pop()
+                            currentPhrase.pop()
                         currentNote[1] = round(currentBeat2-currentNote[0],3)
                         currentNote[4] = (noteToUse-60)*13.75
                         currentNote[3] = currentNote[4]-currentNote[2]
@@ -332,7 +357,7 @@ if __name__ == '__main__':
                                 currentNote[noteParam] = round(currentNote[noteParam],3)
                         if (currentNote[1] == 0):
                                 currentNote[1] = defaultLength
-                        notes += [currentNote]
+                        currentPhrase += [currentNote]
                         currentNote = SetupNote(currentBeat2, 0, noteToUse, noteToUse)
                     log.debug(str(currentNote))
                     noteHeld = True
@@ -354,12 +379,14 @@ if __name__ == '__main__':
                         if (currentNote[1] <= 0):
                             currentNote[1] = defaultLength
                         #log.info(currentNote)
-                        notes += [currentNote]
+                        currentPhrase += [currentNote]
                         noteHeld = False
 
             final_bar = max(final_bar, currentBeat2)
             #log.info("totaltime: " + str(totaltime)+"s")
 
+        if len(currentPhrase) > 0:
+            notes += currentPhrase
         notes = sorted(notes, key=lambda x: x[0] )
 
         if len(notes) == 0 or len(lyricsOut) == 0:
@@ -389,7 +416,6 @@ if __name__ == '__main__':
         print("Combining audio...")
         for entry in os.scandir(basepath):
             if entry.is_file() and entry.name[-4:].lower() == ".ogg":
-                if entry.name.lower() == "crowd.ogg": continue
                 log.info("Combining ogg file " + entry.name)
                 if combinedAudio == None:
                     combinedAudio = AudioSegment.from_ogg(entry.path)

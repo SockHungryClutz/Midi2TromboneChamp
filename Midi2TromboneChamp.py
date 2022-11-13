@@ -150,15 +150,39 @@ if __name__ == '__main__':
         except:
             log.warning("No ini or missing section: " + str(basepath))
             continue
+
         try:
             dicc["description"] = config["song"]["loading_phrase"]
         except:
-            dicc["description"] = config["song"]["icon"]
             pass
+        if dicc["description"] == "":
+            dicc["description"] = config["song"]["icon"]
 
         if dicc["difficulty"] <= 2:
             log.warning("No vocal track indicated in ini: " + str(basepath))
             continue
+
+        outdir = os.path.join("./_output", dicc["trackRef"])
+        os.makedirs(outdir, exist_ok=True)
+        # combine audio first so we know how long the audio is and cap the chart length
+        # Initializing shit at the scope I need it and setting it to NULL is a habit from C++
+        combinedAudio = None
+        tempAudio = None
+        print("Combining audio...")
+        for entry in os.scandir(basepath):
+            if entry.is_file() and entry.name[-4:].lower() == ".ogg":
+                log.info("Combining ogg file " + entry.name)
+                if combinedAudio == None:
+                    combinedAudio = AudioSegment.from_ogg(entry.path)
+                    combinedAudio = combinedAudio - 5
+                else:
+                    tempAudio = AudioSegment.from_ogg(entry.path)
+                    tempAudio = tempAudio - 5
+                    combinedAudio = combinedAudio.overlay(tempAudio)
+        print("Writing combined song.ogg")
+        combinedAudio.export(os.path.join(outdir,"song.ogg"), format="ogg")#, codec="libvorbis", bitrate="1441k")
+        # Get audio length
+        songlenseconds = len(combinedAudio) / 1000
 
         # Import the MIDI file...
         mid = MidiFile(path, clip=True)
@@ -302,6 +326,10 @@ if __name__ == '__main__':
                                 note[2] = round(((note[2]/13.75)+12)*13.75,3)
                                 note[4] = round(((note[4]/13.75)+12)*13.75,3)
                                 note[3] = round(note[4]-note[2],3)
+                        for note in currentPhrase:
+                            note[2] = min(max(-178.75, note[2]),178.75)
+                            note[4] = min(max(-178.75, note[4]),178.75)
+                            note[3] = round(note[4]-note[2],3)
                         notes += currentPhrase
                         currentPhrase = []
                         shiftVotes = [0,0,0,0]
@@ -315,7 +343,7 @@ if __name__ == '__main__':
                         shiftVotes[3] += 1
                     elif message.note > 61:
                         shiftVotes[1] += 1
-                    noteToUse = min(max(47, message.note),73)
+                    noteToUse = message.note
                     lastNote = noteToUse
                     if (lastNoteOffBeat == currentBeat2): noteHeld = True
                     try:
@@ -335,20 +363,32 @@ if __name__ == '__main__':
                         currentNote = SetupNote(currentBeat2, 0, noteToUse, noteToUse)
                         heldNoteChannel = message.channel
                     else:
+                        fromPhrase = True # This nearly useless var is brought to you by one dumb chart with bad markers
                         #If we are holding one, we add the previous note we set up, and set up a new one
                         log.debug("Cancelling Previous note! " + str(currentBeat2) + " old is " + str(currentNote[0]))
                         # if currentNote has a length, that means that the previous note was already terminated
                         # and this is a special condition to force a glissando
                         if (currentNote[1] > defaultLength * 2):
-                            currentPhrase.pop()
-                            # it looks better if the slide starts in the middle of the previous note
-                            # but this isn't always best if the note is too short
-                            currentNote[1] = round(max(defaultLength,currentNote[1] / 2),3)
-                            currentPhrase += [currentNote]
-                            currentNote = [round(currentNote[0] + currentNote[1], 3),0,currentNote[2],0,0]
+                            if currentPhrase != []:
+                                currentPhrase.pop()
+                                # it looks better if the slide starts in the middle of the previous note
+                                # but this isn't always best if the note is too short
+                                currentNote[1] = round(max(defaultLength,currentNote[1] / 2),3)
+                                currentPhrase += [currentNote]
+                                currentNote = [round(currentNote[0] + currentNote[1], 3),0,currentNote[2],0,0]
+                            else:
+                                notes.pop()
+                                currentNote[1] = round(max(defaultLength,currentNote[1] / 2),3)
+                                currentPhrase += [currentNote]
+                                currentNote = [round(currentNote[0] + currentNote[1], 3),0,currentNote[2],0,0]
+                                fromPhrase = False
                         elif (currentNote[1] > 0):
                             # remove previous note, new note becomes a slide
-                            currentPhrase.pop()
+                            if currentPhrase != []:
+                                currentPhrase.pop()
+                            else:
+                                notes.pop()
+                                fromPhrase = False
                         currentNote[1] = round(currentBeat2-currentNote[0],3)
                         currentNote[4] = (noteToUse-60)*13.75
                         currentNote[3] = currentNote[4]-currentNote[2]
@@ -357,13 +397,16 @@ if __name__ == '__main__':
                                 currentNote[noteParam] = round(currentNote[noteParam],3)
                         if (currentNote[1] == 0):
                                 currentNote[1] = defaultLength
-                        currentPhrase += [currentNote]
+                        if fromPhrase:
+                            currentPhrase += [currentNote]
+                        else:
+                            notes += [currentNote]
                         currentNote = SetupNote(currentBeat2, 0, noteToUse, noteToUse)
                     log.debug(str(currentNote))
                     noteHeld = True
 
                 if (message.type == "note_off" or (message.type == "note_on" and message.velocity == 0)):
-                    noteToUse = min(max(47, message.note),73)
+                    noteToUse = message.note
                     lastNoteOffBeat = currentBeat2
                     # The original intention was to terminate the held note when there was a noteoff event on channel 0
                     # Other channels could be used for adding glissando. The issue is rock band charts frequently use
@@ -386,6 +429,20 @@ if __name__ == '__main__':
             #log.info("totaltime: " + str(totaltime)+"s")
 
         if len(currentPhrase) > 0:
+            if shiftVotes[2] > shiftVotes[3]:
+                for note in currentPhrase:
+                    note[2] = round(((note[2]/13.75)-12)*13.75,3)
+                    note[4] = round(((note[4]/13.75)-12)*13.75,3)
+                    note[3] = round(note[4]-note[2],3)
+            elif shiftVotes[0] > shiftVotes[1]:
+                for note in currentPhrase:
+                    note[2] = round(((note[2]/13.75)+12)*13.75,3)
+                    note[4] = round(((note[4]/13.75)+12)*13.75,3)
+                    note[3] = round(note[4]-note[2],3)
+            for note in currentPhrase:
+                note[2] = min(max(-178.75, note[2]),178.75)
+                note[4] = min(max(-178.75, note[4]),178.75)
+                note[3] = round(note[4]-note[2],3)
             notes += currentPhrase
         notes = sorted(notes, key=lambda x: x[0] )
 
@@ -393,8 +450,17 @@ if __name__ == '__main__':
             log.warning("No notes or lyrics in current file, skipping")
             continue
 
+        songlenbeats = math.floor(dicc["tempo"] * (songlenseconds / 60))
+        if songlenbeats < final_bar:
+            log.warning(str(songlenbeats) + " < " + str(final_bar))
+            if notes[-1][0] > songlenbeats:
+                print("Unable to automatically fix song length, song will be truncated!")
+                log.error("Unable to automatically fix song length, song will be truncated!")
+            else:
+                notes[-1][1] = round(songlenbeats - notes[-1][0] - 0.009, 3)
+
         dicc["notes"] = notes
-        dicc["endpoint"]= int(final_bar+4)
+        dicc["endpoint"]= min(int(final_bar+4), songlenbeats)
         dicc["lyrics"]= lyricsOut
         dicc["UNK1"]= 0
 
@@ -405,27 +471,9 @@ if __name__ == '__main__':
                     dicc["genre"],
                     str(dicc["difficulty"])]
 
-        outdir = os.path.join("./_output", dicc["trackRef"])
-        os.makedirs(outdir, exist_ok=True)
         with open(os.path.join(outdir, "song.tmb"),"w",encoding="utf-8") as file:
             print("Writing chart for song " + dicc["trackRef"])
             file.write(chartjson)
-        # Initializing shit at the scope I need it and setting it to NULL is a habit from C++
-        combinedAudio = None
-        tempAudio = None
-        print("Combining audio...")
-        for entry in os.scandir(basepath):
-            if entry.is_file() and entry.name[-4:].lower() == ".ogg":
-                log.info("Combining ogg file " + entry.name)
-                if combinedAudio == None:
-                    combinedAudio = AudioSegment.from_ogg(entry.path)
-                    combinedAudio = combinedAudio - 5
-                else:
-                    tempAudio = AudioSegment.from_ogg(entry.path)
-                    tempAudio = tempAudio - 5
-                    combinedAudio = combinedAudio.overlay(tempAudio)
-        print("Writing combined song.ogg")
-        combinedAudio.export(os.path.join(outdir,"song.ogg"), format="ogg")#, codec="libvorbis", bitrate="1441k")
         # Make a cool BG that fills the 1920x1080 space smartly
         print("Creating bg image")
         bg = Image.new("RGBA", (1920, 1080))
